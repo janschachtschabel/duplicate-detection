@@ -1,24 +1,33 @@
-"""Embedding-based duplicate detection using ONNX runtime (Vercel-compatible)."""
+"""Embedding-based duplicate detection using ONNX runtime (Vercel-compatible).
+
+Lightweight implementation using only:
+- onnxruntime: For model inference
+- tokenizers: For text tokenization (no transformers needed)
+- numpy: For cosine similarity (no sklearn needed)
+"""
 
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 from loguru import logger
 
 from app.config import detection_config
 from app.models import ContentMetadata, DuplicateCandidate
 
+
+def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute cosine similarity between two vectors using numpy."""
+    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
 # Check if ONNX runtime is available
 ONNX_AVAILABLE = False
-ONNX_SESSION = None
-
 try:
     import onnxruntime as ort
-    from transformers import AutoTokenizer
+    from tokenizers import Tokenizer
     ONNX_AVAILABLE = True
 except ImportError:
-    logger.warning("onnxruntime not installed. Embedding detection will be disabled.")
+    logger.warning("onnxruntime/tokenizers not installed. Embedding detection will be disabled.")
 
 # Local model path (exported via scripts/export_model.py)
 LOCAL_MODEL_PATH = Path(__file__).parent.parent / "models" / "embedding-model"
@@ -69,11 +78,11 @@ def get_embedding_model():
     if not ONNX_AVAILABLE:
         raise RuntimeError(
             "Embedding detection is not available. "
-            "onnxruntime is not installed. "
+            "onnxruntime/tokenizers is not installed. "
             "Use hash-based detection instead."
         )
     
-    # Only local model is supported (pre-exported ONNX)
+    # Only local model is supported (pre-exported ONNX + tokenizer.json)
     if not is_local_model_available():
         raise RuntimeError(
             "Local ONNX model not found. "
@@ -87,15 +96,15 @@ def get_embedding_model():
         try:
             logger.info(f"Loading ONNX embedding model from: {model_path}")
             
-            # Load tokenizer from local path
-            _tokenizer = AutoTokenizer.from_pretrained(model_path)
+            # Load tokenizer from tokenizer.json (no transformers needed)
+            tokenizer_path = LOCAL_MODEL_PATH / "tokenizer.json"
+            _tokenizer = Tokenizer.from_file(str(tokenizer_path))
             
-            # Create ONNX Runtime session directly
+            # Create ONNX Runtime session
             onnx_path = LOCAL_MODEL_PATH / "model.onnx"
             sess_options = ort.SessionOptions()
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             
-            # Use CPU provider (Vercel compatible)
             _model = ort.InferenceSession(
                 str(onnx_path),
                 sess_options,
@@ -103,7 +112,7 @@ def get_embedding_model():
             )
             
             _model_name = model_path
-            logger.info(f"ONNX embedding model loaded successfully")
+            logger.info(f"ONNX embedding model loaded successfully (lightweight mode)")
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
             raise RuntimeError(f"Could not load embedding model {model_path}: {e}")
@@ -170,24 +179,25 @@ class EmbeddingDetector:
             if len(text) > 10000:
                 text = text[:10000]
             
-            # Tokenize
-            inputs = self.tokenizer(text, padding=True, truncation=True, max_length=512, return_tensors="np")
+            # Tokenize using tokenizers library
+            self.tokenizer.enable_truncation(max_length=512)
+            self.tokenizer.enable_padding()
+            encoding = self.tokenizer.encode(text)
             
-            # Prepare inputs for ONNX runtime
-            onnx_inputs = {
-                "input_ids": inputs["input_ids"],
-                "attention_mask": inputs["attention_mask"]
-            }
-            
-            # Add token_type_ids if present
-            if "token_type_ids" in inputs:
-                onnx_inputs["token_type_ids"] = inputs["token_type_ids"]
+            # Prepare inputs for ONNX
+            input_ids = np.array([encoding.ids], dtype=np.int64)
+            attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
+            token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
             
             # Run through ONNX model
-            outputs = self.model.run(None, onnx_inputs)
+            outputs = self.model.run(None, {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids
+            })
             
-            # Mean pooling (outputs[0] is the last hidden state)
-            embedding = self._mean_pooling(outputs, inputs["attention_mask"])
+            # Mean pooling (outputs[0] is last hidden state)
+            embedding = self._mean_pooling(outputs, attention_mask)
             
             return embedding[0]  # Return first (and only) embedding
         except Exception as e:
@@ -221,12 +231,8 @@ class EmbeddingDetector:
         if emb1 is None or emb2 is None:
             return 0.0
         
-        # Reshape for sklearn
-        emb1 = emb1.reshape(1, -1)
-        emb2 = emb2.reshape(1, -1)
-        
-        similarity = cosine_similarity(emb1, emb2)[0][0]
-        return float(similarity)
+        # Use numpy-based cosine similarity (no sklearn needed)
+        return cosine_sim(emb1, emb2)
     
     def batch_compute_embeddings(self, texts: List[str]) -> List[Optional[np.ndarray]]:
         """
@@ -256,24 +262,25 @@ class EmbeddingDetector:
             return [None] * len(texts)
         
         try:
-            # Tokenize all texts at once
-            inputs = self.tokenizer(valid_texts, padding=True, truncation=True, max_length=512, return_tensors="np")
+            # Tokenize all texts at once using tokenizers library
+            self.tokenizer.enable_truncation(max_length=512)
+            self.tokenizer.enable_padding()
+            encodings = self.tokenizer.encode_batch(valid_texts)
             
-            # Prepare inputs for ONNX runtime
-            onnx_inputs = {
-                "input_ids": inputs["input_ids"],
-                "attention_mask": inputs["attention_mask"]
-            }
-            
-            # Add token_type_ids if present
-            if "token_type_ids" in inputs:
-                onnx_inputs["token_type_ids"] = inputs["token_type_ids"]
+            # Prepare inputs for ONNX
+            input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
+            attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
+            token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
             
             # Run through ONNX model
-            outputs = self.model.run(None, onnx_inputs)
+            outputs = self.model.run(None, {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids
+            })
             
-            # Mean pooling (outputs[0] is the last hidden state)
-            embeddings = self._mean_pooling(outputs, inputs["attention_mask"])
+            # Mean pooling (outputs[0] is last hidden state)
+            embeddings = self._mean_pooling(outputs, attention_mask)
             
             # Build result list
             result = [None] * len(texts)
