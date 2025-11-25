@@ -2,10 +2,12 @@
 
 FastAPI-basierter Dienst zur Erkennung von Dubletten (ähnlichen Inhalten) im WLO-Repository.
 
+**🚀 Live Demo:** https://wlo-duplicate-detection.vercel.app/
+
 ## Features
 
 - **Hash-basierte Erkennung (MinHash)**: Schnelle Ähnlichkeitsberechnung basierend auf Textshingles
-- **Embedding-basierte Erkennung (ONNX)**: Semantische Ähnlichkeit mit `paraphrase-multilingual-MiniLM-L12-v2`
+- **Embedding-basierte Erkennung (ONNX)**: Semantische Ähnlichkeit mit konfigurierbarem Modell
 - **Embedding-API**: Separater Endpunkt für Embedding-Generierung (ohne Rate Limit)
 - **Vercel-kompatibel**: Nutzt ONNX Runtime statt PyTorch (~143MB quantisiert)
 - **Flexible Eingabe**: Per Node-ID oder direkte Metadateneingabe
@@ -77,13 +79,15 @@ curl -X POST "http://localhost:8000/detect/hash/by-metadata" \
 #### `POST /detect/embedding/by-node`
 Semantische Dublettenerkennung per Node-ID.
 
+**Beispiel:** Dublette finden für einen bestehenden Inhalt auf Production:
+
 ```bash
 curl -X POST "http://localhost:8000/detect/embedding/by-node" \
   -H "Content-Type: application/json" \
   -d '{
-    "node_id": "12345678-1234-1234-1234-123456789abc",
+    "node_id": "948f53c2-3e3e-4247-8af9-e39cb256aa20",
     "environment": "production",
-    "similarity_threshold": 0.85
+    "similarity_threshold": 0.95
   }'
 ```
 
@@ -98,8 +102,8 @@ curl -X POST "http://localhost:8000/detect/embedding/by-metadata" \
       "title": "Mathematik für Grundschüler",
       "description": "Lernen Sie die Grundlagen der Mathematik"
     },
-    "environment": "staging",
-    "similarity_threshold": 0.85
+    "environment": "production",
+    "similarity_threshold": 0.95
   }'
 ```
 
@@ -121,7 +125,7 @@ curl -X POST "http://localhost:8000/embed" \
   "text": "Dies ist ein Beispieltext",
   "embedding": [0.0234, -0.0567, ...],
   "dimensions": 384,
-  "model": "paraphrase-multilingual-MiniLM-L12-v2"
+  "model": "multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt"
 }
 ```
 
@@ -141,7 +145,7 @@ curl -X POST "http://localhost:8000/embed/batch" \
   "embeddings": [[...], [...], [...]],
   "dimensions": 384,
   "count": 3,
-  "model": "paraphrase-multilingual-MiniLM-L12-v2"
+  "model": "multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt"
 }
 ```
 
@@ -165,7 +169,7 @@ curl -X POST "http://localhost:8000/embed/batch" \
 
 | Parameter | Typ | Default | Beschreibung |
 |-----------|-----|---------|--------------|
-| `similarity_threshold` | float | `0.85` | Mindest-Kosinus-Ähnlichkeit (0-1) |
+| `similarity_threshold` | float | `0.95` | Mindest-Kosinus-Ähnlichkeit (0-1) |
 
 ### Metadata-Objekt
 
@@ -223,8 +227,61 @@ curl -X POST "http://localhost:8000/embed/batch" \
 |--------|----------------|-----------|
 | **Geschwindigkeit** | Sehr schnell | Langsamer (GPU empfohlen) |
 | **Erkennung** | Wörtliche Ähnlichkeit | Semantische Ähnlichkeit |
-| **Modell** | Shingle-basiert | paraphrase-MiniLM-L12 |
+| **Modell** | Shingle-basiert | Multilingual MiniLM |
 | **Ideal für** | Exakte/nahe Duplikate | Umformulierte Texte |
+
+## Embedding-Modell Konfiguration
+
+Die API unterstützt verschiedene Embedding-Modelle je nach Deployment:
+
+| Umgebung | Modell | Größe | Sprachen |
+|----------|--------|-------|----------|
+| **Vercel** | `multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt` | ~99 MB | DE, EN, ES, FR, IT, NL, PL, PT |
+| **Lokal (empfohlen)** | `paraphrase-multilingual-MiniLM-L12-v2` | ~450 MB | 50+ Sprachen |
+
+### Modell wechseln
+
+Es gibt drei Möglichkeiten, das Embedding-Modell zu ändern:
+
+**1. Umgebungsvariable (empfohlen):**
+```bash
+# Linux/Mac
+export EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+# Windows PowerShell
+$env:EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+```
+
+**2. `.env` Datei:**
+```
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+```
+
+**3. Config-Datei (`app/config.py`):**
+```python
+local_model: str = Field(default="sentence-transformers/ihr-modell")
+```
+
+### Priorität der Modellwahl
+
+```
+1. EMBEDDING_MODEL Umgebungsvariable (höchste Priorität)
+   ↓
+2. Vercel-Erkennung → vercel_model (kleineres Modell)
+   ↓
+3. Lokal → local_model (größeres Modell)
+```
+
+### Empfehlung für lokales Deployment
+
+Für bessere Erkennungsqualität außerhalb von Vercel empfehlen wir das größere Modell:
+
+Das größere Modell bietet:
+- ✅ Bessere semantische Erkennung
+- ✅ Unterstützung für 50+ Sprachen
+- ✅ Höhere Genauigkeit bei mehrsprachigen Inhalten
+
+Mehr Infos: https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 
 ## Entwicklung
 
@@ -252,21 +309,40 @@ Der Health-Endpoint zeigt an, ob das lokale Modell verwendet wird:
 }
 ```
 
-## Deployment auf Vercel
+## Deployment
+
+### Lokal / eigener Server (empfohlen)
+
+Für beste Qualität mit dem größeren Modell:
 
 ```bash
-# 1. Modell exportieren (quantisiert für Vercel)
-python scripts/export_model_quantized.py
+# Optional: Größeres Modell verwenden
+export EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
-# 2. Vercel CLI installieren
+# Server starten
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# Erster Start: Modell wird heruntergeladen (einmalig)
+```
+
+### Vercel
+
+Auf Vercel wird automatisch das kleinere Modell (`multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt`, <100MB) verwendet:
+
+```bash
+# Vercel CLI installieren
 npm i -g vercel
 
-# 3. Deployen (inkl. models/ Ordner)
+# Deployen (Modell ist bereits im Repo)
 cd duplicate-detection
 vercel
 ```
 
-Die `vercel.json` ist bereits konfiguriert. Beide Erkennungsmethoden funktionieren auf Vercel dank ONNX Runtime und quantisiertem Modell.
+| Methode | Vercel | Lokal |
+|---------|--------|------|
+| Hash-Erkennung | ✅ | ✅ |
+| Embedding-Erkennung | ✅ | ✅ |
+| Embedding-API | ✅ | ✅ |
+| Großes Modell (50+ Sprachen) | ❌ | ✅ |
 
 ## Rate Limits
 
@@ -276,6 +352,12 @@ Die `vercel.json` ist bereits konfiguriert. Beide Erkennungsmethoden funktionier
 | `/embed` | Kein Limit |
 | `/embed/batch` | Kein Limit |
 | `/health` | Kein Limit |
+
+## Credits
+
+Die Hash-basierte Dublettenerkennung (MinHash) basiert auf dem Code von:
+- **Original-Projekt:** https://github.com/yovisto/wlo-duplicate-detection
+- **Autor:** Yovisto GmbH
 
 ## Technologien
 

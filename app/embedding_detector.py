@@ -37,6 +37,29 @@ def is_local_model_available() -> bool:
     return LOCAL_MODEL_PATH.exists() and (LOCAL_MODEL_PATH / "model.onnx").exists()
 
 
+def get_current_model_name() -> str:
+    """Get the name of the currently configured/loaded model."""
+    if _model_name:
+        # Check if it's a local path (contains backslash or models folder)
+        if str(LOCAL_MODEL_PATH) in _model_name or "models" in _model_name or "\\" in _model_name:
+            # For local models, read the model name from model_info.json
+            try:
+                import json
+                info_path = LOCAL_MODEL_PATH / "model_info.json"
+                if info_path.exists():
+                    with open(info_path) as f:
+                        info = json.load(f)
+                        return info.get("model_name", "local-embedding-model")
+            except:
+                pass
+            # Fallback: use vercel model name from config (that's what's exported locally)
+            return detection_config.embedding_config.vercel_model.split("/")[-1]
+        # Return loaded model name (HuggingFace path)
+        return _model_name.split("/")[-1] if "/" in _model_name else _model_name
+    # Return configured model name
+    return detection_config.embedding_model_name
+
+
 def get_embedding_model():
     """Get or load the ONNX embedding model (lazy initialization)."""
     global _model, _tokenizer, _model_name
@@ -48,17 +71,19 @@ def get_embedding_model():
             "Use hash-based detection instead."
         )
     
-    # Check if local model exists (faster loading)
+    # Check if local model exists (faster loading, used for Vercel deployment)
     if is_local_model_available():
         model_path = str(LOCAL_MODEL_PATH)
         model_source = "local"
     else:
-        model_path = f"sentence-transformers/{detection_config.embedding_model}"
+        # Use configured model (depends on environment: Vercel vs local)
+        model_path = detection_config.embedding_model
         model_source = "huggingface"
     
     if _model is None or _model_name != model_path:
         try:
             logger.info(f"Loading ONNX embedding model from {model_source}: {model_path}")
+            logger.info(f"Configured model: {detection_config.embedding_model_name}")
             _tokenizer = AutoTokenizer.from_pretrained(model_path)
             
             if model_source == "local":

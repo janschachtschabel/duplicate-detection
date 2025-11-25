@@ -148,6 +148,7 @@ class HealthResponse(BaseModel):
     embedding_detection_available: bool = Field(default=False, description="Whether embedding detection is available")
     embedding_model_loaded: bool = Field(default=False, description="Whether embedding model is loaded")
     embedding_model_local: bool = Field(default=False, description="Whether local ONNX model is used (faster)")
+    embedding_model_name: str = Field(default="", description="Name of the configured embedding model")
     version: str = Field(default="1.0.0")
 
 

@@ -22,7 +22,7 @@ Thumbs.db
 # Logs
 *.log
 
-# Models (optional - comment out to include in repo for faster Vercel deployment)
+# Models - now small enough for GitHub (<100MB)
 # models/
 
 # Vercel

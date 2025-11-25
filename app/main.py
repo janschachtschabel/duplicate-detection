@@ -28,7 +28,8 @@ from app.models import (
 )
 from app.wlo_client import WLOClient
 from app.hash_detector import hash_detector
-from app.embedding_detector import embedding_detector, is_model_loaded, is_embedding_available, is_local_model_available
+from app.embedding_detector import embedding_detector, is_model_loaded, is_embedding_available, is_local_model_available, get_current_model_name
+from app.config import detection_config
 
 # Configure logging with JSON format for production
 logger.remove()
@@ -63,7 +64,7 @@ API für die Erkennung von Dubletten (ähnlichen Inhalten) im WLO-Repository.
 ## Funktionen
 
 - **Hash-basierte Erkennung**: Nutzt MinHash für schnelle Ähnlichkeitsberechnung basierend auf Textshingles
-- **Embedding-basierte Erkennung**: Nutzt paraphrase-multilingual-MiniLM-L12-v2 für semantische Ähnlichkeit
+- **Embedding-basierte Erkennung**: Nutzt konfigurierbares ONNX-Modell für semantische Ähnlichkeit
 
 ## Ablauf
 
@@ -187,14 +188,32 @@ def build_candidate_stats(search_info: dict, field_similarities: dict = None) ->
 )
 async def health_check():
     """Check API health status."""
+    # Get the actual model name (from loaded model or model_info.json)
+    model_name = get_current_model_name() if is_model_loaded() else _get_local_model_name()
+    
     return HealthResponse(
         status="healthy",
         hash_detection_available=True,
         embedding_detection_available=is_embedding_available(),
         embedding_model_loaded=is_model_loaded(),
         embedding_model_local=is_local_model_available(),
+        embedding_model_name=model_name,
         version="1.0.0"
     )
+
+
+def _get_local_model_name() -> str:
+    """Get model name from local model_info.json if available."""
+    import json
+    from pathlib import Path
+    info_path = Path(__file__).parent.parent / "models" / "embedding-model" / "model_info.json"
+    if info_path.exists():
+        try:
+            with open(info_path) as f:
+                return json.load(f).get("model_name", detection_config.embedding_model_name)
+        except:
+            pass
+    return detection_config.embedding_model_name
 
 
 # ============================================================================
@@ -340,7 +359,7 @@ async def detect_hash_by_metadata(request: Request, body: HashMetadataRequest):
     description="""
 Erkennt semantisch ähnliche Inhalte für einen bestehenden WLO-Inhalt.
 
-**Modell:** paraphrase-multilingual-MiniLM-L12-v2
+**Modell:** Konfigurierbar (siehe /health für aktuelles Modell)
 
 **Vorteile:**
 - Erkennt auch semantisch ähnliche Inhalte (nicht nur wörtliche Übereinstimmungen)
@@ -348,7 +367,7 @@ Erkennt semantisch ähnliche Inhalte für einen bestehenden WLO-Inhalt.
 
 **Hinweis:** Beim ersten Aufruf wird das Modell geladen (kann einige Sekunden dauern).
 
-**Schwellenwert:** 0.85 bedeutet 85% semantische Ähnlichkeit.
+**Schwellenwert:** 0.95 (Standard) bedeutet 95% semantische Ähnlichkeit.
 
 **Rate Limit:** 100 Requests pro Minute
     """
@@ -419,14 +438,14 @@ async def detect_embedding_by_node(request: Request, body: EmbeddingDetectionReq
     description="""
 Erkennt semantisch ähnliche Inhalte für einen neuen Inhalt anhand direkt eingegebener Metadaten.
 
-**Modell:** paraphrase-multilingual-MiniLM-L12-v2
+**Modell:** Konfigurierbar (siehe /health für aktuelles Modell)
 
 **Ideal für:**
 - Neue, noch nicht publizierte Inhalte
 - Vorab-Prüfung vor dem Import
 - Semantische Ähnlichkeitssuche
 
-**Schwellenwert:** 0.85 bedeutet 85% semantische Ähnlichkeit.
+**Schwellenwert:** 0.95 (Standard) bedeutet 95% semantische Ähnlichkeit.
 
 **Rate Limit:** 100 Requests pro Minute
     """
@@ -496,7 +515,7 @@ async def detect_embedding_by_metadata(request: Request, body: EmbeddingMetadata
     description="""
 Erzeugt einen Embedding-Vektor für einen Text.
 
-**Modell:** paraphrase-multilingual-MiniLM-L12-v2 (ONNX)
+**Modell:** Konfigurierbar (siehe /health für aktuelles Modell) (ONNX)
 
 **Ausgabe:** 384-dimensionaler Vektor
 
@@ -526,7 +545,7 @@ async def create_embedding(body: EmbeddingRequest):
                 text=body.text,
                 embedding=[],
                 dimensions=0,
-                model="paraphrase-multilingual-MiniLM-L12-v2",
+                model=get_current_model_name(),
                 error="Could not compute embedding"
             )
         
@@ -535,7 +554,7 @@ async def create_embedding(body: EmbeddingRequest):
             text=body.text,
             embedding=embedding.tolist(),
             dimensions=len(embedding),
-            model="paraphrase-multilingual-MiniLM-L12-v2"
+            model=get_current_model_name()
         )
     except Exception as e:
         logger.error(f"Embedding failed: {e}")
@@ -544,7 +563,7 @@ async def create_embedding(body: EmbeddingRequest):
             text=body.text,
             embedding=[],
             dimensions=0,
-            model="paraphrase-multilingual-MiniLM-L12-v2",
+            model=get_current_model_name(),
             error=str(e)
         )
 
@@ -557,7 +576,7 @@ async def create_embedding(body: EmbeddingRequest):
     description="""
 Erzeugt Embedding-Vektoren für mehrere Texte gleichzeitig.
 
-**Modell:** paraphrase-multilingual-MiniLM-L12-v2 (ONNX)
+**Modell:** Konfigurierbar (siehe /health für aktuelles Modell) (ONNX)
 
 **Ausgabe:** Liste von 384-dimensionalen Vektoren
 
@@ -598,7 +617,7 @@ async def create_embeddings_batch(body: EmbeddingBatchRequest):
             embeddings=result_embeddings,
             dimensions=dimensions,
             count=len(result_embeddings),
-            model="paraphrase-multilingual-MiniLM-L12-v2"
+            model=get_current_model_name()
         )
     except Exception as e:
         logger.error(f"Batch embedding failed: {e}")
@@ -607,7 +626,7 @@ async def create_embeddings_batch(body: EmbeddingBatchRequest):
             embeddings=[],
             dimensions=0,
             count=0,
-            model="paraphrase-multilingual-MiniLM-L12-v2",
+            model=get_current_model_name(),
             error=str(e)
         )
 
