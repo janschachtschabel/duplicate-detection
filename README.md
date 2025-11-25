@@ -18,6 +18,30 @@ FastAPI-basierter Dienst zur Erkennung von Dubletten (ähnlichen Inhalten) im WL
 
 ## Installation
 
+### Option 1: Docker (empfohlen)
+
+```bash
+cd duplicate-detection
+
+# Mit Docker Compose (einfachste Variante)
+docker-compose up -d
+
+# Oder manuell bauen und starten
+docker build -t wlo-duplicate-detection .
+docker run -d -p 8000:8000 --name wlo-duplicate-detection wlo-duplicate-detection
+```
+
+**Mit GPU-Unterstützung:**
+```bash
+# GPU-Image bauen
+docker build -f Dockerfile.gpu -t wlo-duplicate-detection:gpu .
+
+# Mit NVIDIA Runtime starten
+docker run -d --gpus all -p 8000:8000 --name wlo-duplicate-detection wlo-duplicate-detection:gpu
+```
+
+### Option 2: Lokale Installation
+
 ```bash
 cd duplicate-detection
 pip install -r requirements.txt
@@ -26,6 +50,9 @@ pip install -r requirements.txt
 ## Starten
 
 ```bash
+# Docker
+docker-compose up -d
+
 # Direkt mit Python
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
@@ -330,6 +357,58 @@ Mehr Infos: https://huggingface.co/sentence-transformers/paraphrase-multilingual
 # Mit Auto-Reload
 uvicorn app.main:app --reload --port 8000
 ```
+
+## Docker
+
+### Container starten
+
+```bash
+# Mit Docker Compose (empfohlen)
+docker-compose up -d
+
+# Logs anzeigen
+docker-compose logs -f
+
+# Stoppen
+docker-compose down
+```
+
+### Manuell bauen
+
+```bash
+# CPU-Version
+docker build -t wlo-duplicate-detection .
+docker run -d -p 8000:8000 --name wlo-duplicate-detection wlo-duplicate-detection
+
+# GPU-Version (NVIDIA)
+docker build -f Dockerfile.gpu -t wlo-duplicate-detection:gpu .
+docker run -d --gpus all -p 8000:8000 --name wlo-duplicate-detection wlo-duplicate-detection:gpu
+```
+
+### Konfiguration
+
+Umgebungsvariablen in `docker-compose.yml` oder via `-e`:
+
+| Variable | Default | Beschreibung |
+|----------|---------|--------------|
+| `EMBEDDING_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding-Modell |
+| `LOG_LEVEL` | `INFO` | Log-Level |
+
+### Dateien
+
+| Datei | Beschreibung |
+|-------|--------------|
+| `Dockerfile` | CPU-Image (python:3.11-slim, ~1.5GB) |
+| `Dockerfile.gpu` | GPU-Image (pytorch/cuda12.1, ~8GB) |
+| `docker-compose.yml` | Orchestrierung mit Volume für Model-Cache |
+| `.dockerignore` | Optimiert Build-Größe |
+
+### Features
+
+- **Health Check**: Automatische Überwachung (`/health` Endpoint)
+- **Model Cache Volume**: Embedding-Modell wird persistent gespeichert
+- **Non-root User**: Sicherheit durch unprivilegierten Benutzer
+- **Restart Policy**: Automatischer Neustart bei Fehler
 
 ## Google Colab
 

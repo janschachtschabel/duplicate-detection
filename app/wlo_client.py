@@ -7,7 +7,7 @@ from urllib3.util.retry import Retry
 from loguru import logger
 
 from app.config import Environment, wlo_config
-from app.models import ContentMetadata, SearchField, normalize_title, normalize_url
+from app.models import ContentMetadata, SearchField, normalize_title, normalize_url, generate_url_search_variants
 
 
 class WLOClient:
@@ -294,26 +294,42 @@ class WLOClient:
                 field_candidates.extend(results)
                 
             elif field == SearchField.URL and self._is_valid_search_value(metadata.url):
-                # Search by original URL
-                search_value = metadata.url
+                # Generate all URL variants to search
+                url_variants = generate_url_search_variants(metadata.url)
+                normalized = normalize_url(metadata.url)
+                
+                logger.info(f"Searching URL with {len(url_variants)} variants")
+                
+                # Search with original URL first (exact match in ccm:wwwurl)
                 results = self.search_by_ngsearch("ccm:wwwurl", metadata.url, max_candidates)
                 original_count = len(results)
                 field_candidates.extend(results)
-                normalized_count = 0
+                existing_ids = {c.get("ref", {}).get("id") for c in field_candidates}
                 
-                # Also search by normalized URL (without protocol, www, etc.)
-                normalized = normalize_url(metadata.url)
-                if normalized:
-                    logger.info(f"Also searching normalized URL: '{normalized}'")
-                    # Search in ngsearchword since ccm:wwwurl might not match normalized format
-                    normalized_results = self.search_by_ngsearch("ngsearchword", normalized, max_candidates)
-                    # Add only new candidates (avoid duplicates)
-                    existing_ids = {c.get("ref", {}).get("id") for c in field_candidates}
-                    for result in normalized_results:
-                        if result.get("ref", {}).get("id") not in existing_ids:
+                # Search with all variants in ngsearchword
+                variant_count = 0
+                searched_variants = []
+                for variant in url_variants:
+                    if variant == metadata.url:
+                        continue  # Skip original, already searched
+                    
+                    variant_results = self.search_by_ngsearch("ngsearchword", variant, max_candidates // 2)
+                    new_in_variant = 0
+                    for result in variant_results:
+                        node_id = result.get("ref", {}).get("id")
+                        if node_id and node_id not in existing_ids:
                             field_candidates.append(result)
-                            normalized_count += 1
-                    search_value = f"{metadata.url} → {normalized}"
+                            existing_ids.add(node_id)
+                            variant_count += 1
+                            new_in_variant += 1
+                    
+                    if new_in_variant > 0:
+                        searched_variants.append(variant[:30])
+                
+                if variant_count > 0:
+                    logger.info(f"URL variants added {variant_count} new candidates")
+                
+                search_value = f"{metadata.url} ({len(url_variants)} variants)"
                 
                 # Filter out the source node
                 if exclude_node_id:
@@ -330,9 +346,10 @@ class WLOClient:
                     "original_search": metadata.url,
                     "original_count": original_count,
                     "normalized_search": normalized if normalized else None,
-                    "normalized_count": normalized_count
+                    "normalized_count": variant_count,
+                    "variants_searched": len(url_variants)
                 }
-                logger.info(f"Field 'url': original={original_count}, normalized=+{normalized_count}, total={len(field_candidates)}")
+                logger.info(f"Field 'url': original={original_count}, variants=+{variant_count}, total={len(field_candidates)}")
                 continue  # Skip the default processing
             
             # Filter out the source node
@@ -349,4 +366,47 @@ class WLOClient:
             }
             logger.info(f"Field '{field.value}': searched with '{search_value[:50] if search_value else 'N/A'}...', found {len(field_candidates)} candidates")
         
+        # Deduplicate candidates across all fields
+        candidates, dedup_stats = self._deduplicate_candidates(candidates)
+        if dedup_stats["duplicates_removed"] > 0:
+            logger.info(f"Deduplicated candidates: {dedup_stats['before']} → {dedup_stats['after']} ({dedup_stats['duplicates_removed']} duplicates removed)")
+        
         return candidates, search_info
+    
+    def _deduplicate_candidates(
+        self, 
+        candidates: Dict[str, List[Dict[str, Any]]]
+    ) -> tuple[Dict[str, List[Dict[str, Any]]], dict]:
+        """
+        Deduplicate candidates across all fields.
+        
+        A node_id should only appear once across all fields.
+        Priority: keep the first occurrence (based on field order).
+        
+        Returns:
+            Tuple of (deduplicated candidates dict, stats dict)
+        """
+        seen_ids = set()
+        total_before = 0
+        total_after = 0
+        
+        deduplicated = {}
+        
+        for field, field_candidates in candidates.items():
+            total_before += len(field_candidates)
+            unique_candidates = []
+            
+            for candidate in field_candidates:
+                node_id = candidate.get("ref", {}).get("id")
+                if node_id and node_id not in seen_ids:
+                    seen_ids.add(node_id)
+                    unique_candidates.append(candidate)
+            
+            deduplicated[field] = unique_candidates
+            total_after += len(unique_candidates)
+        
+        return deduplicated, {
+            "before": total_before,
+            "after": total_after,
+            "duplicates_removed": total_before - total_after
+        }

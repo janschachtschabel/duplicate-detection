@@ -68,10 +68,13 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
     - Remove www. prefix
     - Remove trailing slashes
     - Remove common tracking parameters
+    - YouTube: Extract video/channel ID for canonical form
     
     Examples:
         https://www.Example.com/Page/ -> example.com/page
         http://example.com/page?utm_source=x -> example.com/page
+        https://youtu.be/dQw4w9WgXcQ -> youtube.com/watch?v=dQw4w9WgXcQ
+        https://www.youtube.com/embed/dQw4w9WgXcQ -> youtube.com/watch?v=dQw4w9WgXcQ
     """
     if not url or not url.strip():
         return None
@@ -86,12 +89,12 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
         if host.startswith('www.'):
             host = host[4:]
         
+        # YouTube special handling
+        if 'youtube.com' in host or 'youtu.be' in host:
+            return _normalize_youtube_url(url, parsed, host)
+        
         # Get path without trailing slash
         path = parsed.path.rstrip('/')
-        
-        # Remove common tracking query parameters
-        # Keep the path but drop query params for matching
-        # (exact URL match is still possible via original URL)
         
         # Reconstruct normalized URL (no protocol, no query)
         normalized = host + path
@@ -101,6 +104,233 @@ def normalize_url(url: Optional[str]) -> Optional[str]:
     except Exception:
         # If parsing fails, return lowercase stripped version
         return url.strip().lower()
+
+
+def _normalize_youtube_url(url: str, parsed, host: str) -> Optional[str]:
+    """
+    Normalize YouTube URLs to canonical form.
+    
+    Video formats -> youtube.com/watch?v=VIDEO_ID
+    - youtube.com/watch?v=ID (with optional &t=, &list=, &index=)
+    - youtu.be/ID (with optional ?t=)
+    - youtube.com/embed/ID
+    - youtube.com/v/ID
+    - youtube.com/shorts/ID
+    - youtube.com/live/ID
+    - m.youtube.com/watch?v=ID
+    
+    Channel formats -> youtube.com/channel/CHANNEL_ID or youtube.com/@USERNAME
+    - youtube.com/channel/ID
+    - youtube.com/channel/ID/live
+    - youtube.com/c/NAME
+    - youtube.com/user/NAME
+    - youtube.com/@username
+    
+    Playlist formats -> youtube.com/playlist?list=PLAYLIST_ID
+    """
+    import re
+    from urllib.parse import parse_qs
+    
+    path = parsed.path
+    query = parse_qs(parsed.query)
+    
+    # Extract video ID from various formats
+    video_id = None
+    
+    # youtu.be/VIDEO_ID or youtu.be/VIDEO_ID?t=60
+    if 'youtu.be' in host:
+        video_id = path.strip('/').split('/')[0]  # Get first path segment
+        if '?' in video_id:
+            video_id = video_id.split('?')[0]
+    
+    # youtube.com/watch?v=VIDEO_ID (ignore other params like t=, list=, index=)
+    elif '/watch' in path and 'v' in query:
+        video_id = query['v'][0]
+    
+    # youtube.com/embed/VIDEO_ID
+    elif '/embed/' in path:
+        match = re.search(r'/embed/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    
+    # youtube.com/v/VIDEO_ID (legacy)
+    elif '/v/' in path:
+        match = re.search(r'/v/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    
+    # youtube.com/shorts/VIDEO_ID
+    elif '/shorts/' in path:
+        match = re.search(r'/shorts/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    
+    # youtube.com/live/VIDEO_ID
+    elif '/live/' in path:
+        match = re.search(r'/live/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    
+    # If video ID found (11 chars), return canonical form
+    if video_id and len(video_id) == 11:
+        return f"youtube.com/watch?v={video_id}"
+    
+    # Handle standalone playlists (not video in playlist)
+    if '/playlist' in path and 'list' in query:
+        playlist_id = query['list'][0]
+        return f"youtube.com/playlist?list={playlist_id}"
+    
+    # Handle channels
+    # youtube.com/@username
+    if path.startswith('/@'):
+        username = path[2:].split('/')[0]  # Get handle without /live etc
+        return f"youtube.com/@{username}"
+    
+    # youtube.com/channel/ID or youtube.com/channel/ID/live
+    if '/channel/' in path:
+        match = re.search(r'/channel/([a-zA-Z0-9_-]+)', path)
+        if match:
+            return f"youtube.com/channel/{match.group(1)}"
+    
+    # youtube.com/c/NAME or youtube.com/user/NAME
+    if '/c/' in path:
+        match = re.search(r'/c/([^/]+)', path)
+        if match:
+            return f"youtube.com/c/{match.group(1)}"
+    
+    if '/user/' in path:
+        match = re.search(r'/user/([^/]+)', path)
+        if match:
+            return f"youtube.com/user/{match.group(1)}"
+    
+    # Fallback: just return normalized youtube URL
+    return f"youtube.com{path.rstrip('/')}"
+
+
+def generate_url_search_variants(url: Optional[str]) -> List[str]:
+    """
+    Generate URL variants for candidate search.
+    
+    Since we don't know which format is stored in WLO, we search with multiple variants.
+    
+    Returns list of unique URL variants to search with.
+    """
+    if not url or not url.strip():
+        return []
+    
+    from urllib.parse import urlparse
+    
+    url = url.strip()
+    variants = set()
+    
+    # Add original
+    variants.add(url)
+    
+    try:
+        parsed = urlparse(url.lower())
+        host = parsed.netloc
+        path = parsed.path.rstrip('/')
+        
+        # YouTube: use specialized variant generation only
+        if 'youtube.com' in host or 'youtu.be' in host:
+            yt_variants = _generate_youtube_variants(url, parsed)
+            variants.update(yt_variants)
+            # Add original URL forms too
+            variants.add(url)
+            variants.add(url.lower())
+            return [v for v in variants if v and v.strip()]
+        
+        # Non-YouTube URLs: generate protocol/www variants
+        base_host = host.replace('www.', '') if host.startswith('www.') else host
+        www_host = f"www.{base_host}" if not host.startswith('www.') else host
+        
+        # Generate protocol + host + path combinations
+        for protocol in ['https://', 'http://']:
+            for h in [base_host, www_host]:
+                variants.add(f"{protocol}{h}{path}")
+                variants.add(f"{protocol}{h}{path}/")  # with trailing slash
+        
+        # Also add without protocol (for ngsearchword)
+        variants.add(f"{base_host}{path}")
+        
+    except Exception:
+        pass
+    
+    # Remove empty strings and return unique list
+    return [v for v in variants if v and v.strip()]
+
+
+def _generate_youtube_variants(url: str, parsed) -> List[str]:
+    """Generate YouTube URL variants for search."""
+    import re
+    from urllib.parse import parse_qs
+    
+    variants = []
+    path = parsed.path
+    query = parse_qs(parsed.query)
+    
+    # Extract video ID
+    video_id = None
+    
+    if 'youtu.be' in parsed.netloc:
+        video_id = path.strip('/').split('/')[0]
+        if '?' in video_id:
+            video_id = video_id.split('?')[0]
+    elif '/watch' in path and 'v' in query:
+        video_id = query['v'][0]
+    elif '/embed/' in path:
+        match = re.search(r'/embed/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    elif '/v/' in path:
+        match = re.search(r'/v/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    elif '/shorts/' in path:
+        match = re.search(r'/shorts/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    elif '/live/' in path:
+        match = re.search(r'/live/([a-zA-Z0-9_-]{11})', path)
+        if match:
+            video_id = match.group(1)
+    
+    # Generate all video URL formats for search
+    if video_id and len(video_id) == 11:
+        variants.extend([
+            # Standard watch URLs
+            f"https://www.youtube.com/watch?v={video_id}",
+            f"https://youtube.com/watch?v={video_id}",
+            f"http://www.youtube.com/watch?v={video_id}",
+            f"http://youtube.com/watch?v={video_id}",
+            # Short URLs
+            f"https://youtu.be/{video_id}",
+            f"http://youtu.be/{video_id}",
+            # Embed URLs
+            f"https://www.youtube.com/embed/{video_id}",
+            f"http://www.youtube.com/embed/{video_id}",
+            # Legacy v/ format
+            f"https://www.youtube.com/v/{video_id}",
+            # Shorts
+            f"https://www.youtube.com/shorts/{video_id}",
+            # Live
+            f"https://www.youtube.com/live/{video_id}",
+            # Mobile
+            f"https://m.youtube.com/watch?v={video_id}",
+            # Just the ID for ngsearchword
+            video_id,
+        ])
+    
+    # Handle playlists
+    if 'list' in query:
+        playlist_id = query['list'][0]
+        variants.extend([
+            f"https://www.youtube.com/playlist?list={playlist_id}",
+            f"https://youtube.com/playlist?list={playlist_id}",
+            playlist_id,
+        ])
+    
+    return variants
 
 
 class SearchField(str, Enum):
