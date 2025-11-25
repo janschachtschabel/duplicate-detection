@@ -11,12 +11,14 @@ from app.models import ContentMetadata, DuplicateCandidate
 
 # Check if ONNX runtime is available
 ONNX_AVAILABLE = False
+ONNX_SESSION = None
+
 try:
-    from optimum.onnxruntime import ORTModelForFeatureExtraction
+    import onnxruntime as ort
     from transformers import AutoTokenizer
     ONNX_AVAILABLE = True
 except ImportError:
-    logger.warning("optimum/onnxruntime not installed. Embedding detection will be disabled.")
+    logger.warning("onnxruntime not installed. Embedding detection will be disabled.")
 
 # Local model path (exported via scripts/export_model.py)
 LOCAL_MODEL_PATH = Path(__file__).parent.parent / "models" / "embedding-model"
@@ -67,34 +69,41 @@ def get_embedding_model():
     if not ONNX_AVAILABLE:
         raise RuntimeError(
             "Embedding detection is not available. "
-            "optimum/onnxruntime is not installed. "
+            "onnxruntime is not installed. "
             "Use hash-based detection instead."
         )
     
-    # Check if local model exists (faster loading, used for Vercel deployment)
-    if is_local_model_available():
-        model_path = str(LOCAL_MODEL_PATH)
-        model_source = "local"
-    else:
-        # Use configured model (depends on environment: Vercel vs local)
-        model_path = detection_config.embedding_model
-        model_source = "huggingface"
+    # Only local model is supported (pre-exported ONNX)
+    if not is_local_model_available():
+        raise RuntimeError(
+            "Local ONNX model not found. "
+            f"Expected at: {LOCAL_MODEL_PATH}/model.onnx. "
+            "Run 'python scripts/export_final_model.py' to export the model."
+        )
+    
+    model_path = str(LOCAL_MODEL_PATH)
     
     if _model is None or _model_name != model_path:
         try:
-            logger.info(f"Loading ONNX embedding model from {model_source}: {model_path}")
-            logger.info(f"Configured model: {detection_config.embedding_model_name}")
+            logger.info(f"Loading ONNX embedding model from: {model_path}")
+            
+            # Load tokenizer from local path
             _tokenizer = AutoTokenizer.from_pretrained(model_path)
             
-            if model_source == "local":
-                # Load from local without export
-                _model = ORTModelForFeatureExtraction.from_pretrained(model_path)
-            else:
-                # Download and export from HuggingFace
-                _model = ORTModelForFeatureExtraction.from_pretrained(model_path, export=True)
+            # Create ONNX Runtime session directly
+            onnx_path = LOCAL_MODEL_PATH / "model.onnx"
+            sess_options = ort.SessionOptions()
+            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            
+            # Use CPU provider (Vercel compatible)
+            _model = ort.InferenceSession(
+                str(onnx_path),
+                sess_options,
+                providers=['CPUExecutionProvider']
+            )
             
             _model_name = model_path
-            logger.info(f"ONNX embedding model loaded successfully ({model_source})")
+            logger.info(f"ONNX embedding model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
             raise RuntimeError(f"Could not load embedding model {model_path}: {e}")
@@ -164,10 +173,20 @@ class EmbeddingDetector:
             # Tokenize
             inputs = self.tokenizer(text, padding=True, truncation=True, max_length=512, return_tensors="np")
             
-            # Run through ONNX model
-            outputs = self.model(**inputs)
+            # Prepare inputs for ONNX runtime
+            onnx_inputs = {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"]
+            }
             
-            # Mean pooling
+            # Add token_type_ids if present
+            if "token_type_ids" in inputs:
+                onnx_inputs["token_type_ids"] = inputs["token_type_ids"]
+            
+            # Run through ONNX model
+            outputs = self.model.run(None, onnx_inputs)
+            
+            # Mean pooling (outputs[0] is the last hidden state)
             embedding = self._mean_pooling(outputs, inputs["attention_mask"])
             
             return embedding[0]  # Return first (and only) embedding
@@ -240,10 +259,20 @@ class EmbeddingDetector:
             # Tokenize all texts at once
             inputs = self.tokenizer(valid_texts, padding=True, truncation=True, max_length=512, return_tensors="np")
             
-            # Run through ONNX model
-            outputs = self.model(**inputs)
+            # Prepare inputs for ONNX runtime
+            onnx_inputs = {
+                "input_ids": inputs["input_ids"],
+                "attention_mask": inputs["attention_mask"]
+            }
             
-            # Mean pooling
+            # Add token_type_ids if present
+            if "token_type_ids" in inputs:
+                onnx_inputs["token_type_ids"] = inputs["token_type_ids"]
+            
+            # Run through ONNX model
+            outputs = self.model.run(None, onnx_inputs)
+            
+            # Mean pooling (outputs[0] is the last hidden state)
             embeddings = self._mean_pooling(outputs, inputs["attention_mask"])
             
             # Build result list
