@@ -1,8 +1,0 @@
-{
-  "model_name": "multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt",
-  "model_id": "h4g3n/multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt",
-  "quantization": "INT8",
-  "languages": ["de", "en", "es", "fr", "it", "nl", "pl", "pt"],
-  "dimensions": 384,
-  "exported_by": "export_final_model.py"
-}

@@ -4,11 +4,10 @@ import binascii
 import random
 from typing import List, Set, Tuple, Optional, Dict, Any
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
 from loguru import logger
 
 from app.config import detection_config
-from app.models import ContentMetadata, DuplicateCandidate
+from app.models import ContentMetadata, DuplicateCandidate, normalize_url
 
 
 class MinHashDetector:
@@ -150,7 +149,8 @@ class MinHashDetector:
         if sig1 is None or sig2 is None:
             return 0.0
         
-        similarity = cosine_similarity([sig1], [sig2])[0][0]
+        # Cosine similarity using numpy
+        similarity = np.dot(sig1, sig2) / (np.linalg.norm(sig1) * np.linalg.norm(sig2))
         return float(similarity)
     
     def _is_valid_field(self, value) -> bool:
@@ -253,23 +253,35 @@ class MinHashDetector:
                         url = val[0] if isinstance(val, list) else val
                         break
                 
-                # Build candidate text from SAME fields as source
-                candidate_parts = []
-                if has_title and title:
-                    candidate_parts.append(title)
-                if has_description and description:
-                    candidate_parts.append(description)
-                if has_keywords and keywords:
-                    candidate_parts.extend(keywords)
+                # Check for URL match first (normalized URLs)
+                source_norm_url = normalize_url(source_metadata.url)
+                candidate_norm_url = normalize_url(url)
+                url_match = (source_norm_url and candidate_norm_url and 
+                            source_norm_url == candidate_norm_url)
                 
-                candidate_text = " ".join(candidate_parts)
-                candidate_sig = self.compute_text_signature(candidate_text)
-                
-                if candidate_sig is None:
-                    continue
-                
-                # Compute similarity
-                similarity = self.compute_similarity(source_sig, candidate_sig)
+                if url_match:
+                    # Exact URL match = definite duplicate
+                    similarity = 1.0
+                    match_type = "url_exact"
+                else:
+                    # Build candidate text from SAME fields as source
+                    match_type = search_field
+                    candidate_parts = []
+                    if has_title and title:
+                        candidate_parts.append(title)
+                    if has_description and description:
+                        candidate_parts.append(description)
+                    if has_keywords and keywords:
+                        candidate_parts.extend(keywords)
+                    
+                    candidate_text = " ".join(candidate_parts)
+                    candidate_sig = self.compute_text_signature(candidate_text)
+                    
+                    if candidate_sig is None:
+                        continue
+                    
+                    # Compute similarity
+                    similarity = self.compute_similarity(source_sig, candidate_sig)
                 
                 # Track max similarity for this field
                 if similarity > field_max:
@@ -280,7 +292,9 @@ class MinHashDetector:
                     continue
                 seen_ids.add(node_id)
                 
-                if similarity >= threshold:
+                # URL matches are ALWAYS duplicates (regardless of threshold)
+                # Other matches must meet the similarity threshold
+                if url_match or similarity >= threshold:
                     duplicates.append(DuplicateCandidate(
                         node_id=node_id,
                         title=title,
@@ -288,7 +302,7 @@ class MinHashDetector:
                         keywords=keywords,
                         url=url,
                         similarity_score=round(similarity, 4),
-                        match_source=search_field
+                        match_source=match_type
                     ))
             
             # Store max similarity for this field (only if candidates were found)
@@ -298,7 +312,10 @@ class MinHashDetector:
         # Sort by similarity (highest first)
         duplicates.sort(key=lambda x: x.similarity_score, reverse=True)
         
-        logger.info(f"Found {len(duplicates)} hash-based duplicates above threshold {threshold}")
+        # Count URL exact matches vs similarity matches
+        url_matches = sum(1 for d in duplicates if d.match_source == "url_exact")
+        sim_matches = len(duplicates) - url_matches
+        logger.info(f"Found {len(duplicates)} hash-based duplicates: {url_matches} URL-exact, {sim_matches} above threshold {threshold}")
         return duplicates, field_max_similarity
 
 

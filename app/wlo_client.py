@@ -7,7 +7,7 @@ from urllib3.util.retry import Retry
 from loguru import logger
 
 from app.config import Environment, wlo_config
-from app.models import ContentMetadata, SearchField
+from app.models import ContentMetadata, SearchField, normalize_title, normalize_url
 
 
 class WLOClient:
@@ -240,10 +240,45 @@ class WLOClient:
             search_value = None
             
             if field == SearchField.TITLE and self._is_valid_search_value(metadata.title):
-                # Search by title using ngsearchword
+                # Search by original title using ngsearchword
                 search_value = metadata.title
                 results = self.search_by_ngsearch("ngsearchword", metadata.title, max_candidates)
+                original_count = len(results)
                 field_candidates.extend(results)
+                normalized_count = 0
+                
+                # Also search by normalized title (removes suffixes like "- Wikipedia")
+                normalized = normalize_title(metadata.title)
+                if normalized and normalized != metadata.title:
+                    logger.info(f"Also searching normalized title: '{normalized}'")
+                    normalized_results = self.search_by_ngsearch("ngsearchword", normalized, max_candidates)
+                    # Add only new candidates (avoid duplicates)
+                    existing_ids = {c.get("ref", {}).get("id") for c in field_candidates}
+                    for result in normalized_results:
+                        if result.get("ref", {}).get("id") not in existing_ids:
+                            field_candidates.append(result)
+                            normalized_count += 1
+                    search_value = f"{metadata.title} → {normalized}"
+                
+                # Filter out the source node
+                if exclude_node_id:
+                    field_candidates = [
+                        c for c in field_candidates 
+                        if c.get("ref", {}).get("id") != exclude_node_id
+                    ]
+                
+                candidates[field.value] = field_candidates
+                # Store detailed search info
+                search_info[field.value] = {
+                    "search_value": search_value,
+                    "count": len(field_candidates),
+                    "original_search": metadata.title,
+                    "original_count": original_count,
+                    "normalized_search": normalized if normalized else None,
+                    "normalized_count": normalized_count
+                }
+                logger.info(f"Field 'title': original={original_count}, normalized=+{normalized_count}, total={len(field_candidates)}")
+                continue  # Skip the default processing
                 
             elif field == SearchField.DESCRIPTION and self._is_valid_search_value(metadata.description):
                 # Search by description - use first 100 chars for efficiency
@@ -259,10 +294,46 @@ class WLOClient:
                 field_candidates.extend(results)
                 
             elif field == SearchField.URL and self._is_valid_search_value(metadata.url):
-                # Search by URL
+                # Search by original URL
                 search_value = metadata.url
                 results = self.search_by_ngsearch("ccm:wwwurl", metadata.url, max_candidates)
+                original_count = len(results)
                 field_candidates.extend(results)
+                normalized_count = 0
+                
+                # Also search by normalized URL (without protocol, www, etc.)
+                normalized = normalize_url(metadata.url)
+                if normalized:
+                    logger.info(f"Also searching normalized URL: '{normalized}'")
+                    # Search in ngsearchword since ccm:wwwurl might not match normalized format
+                    normalized_results = self.search_by_ngsearch("ngsearchword", normalized, max_candidates)
+                    # Add only new candidates (avoid duplicates)
+                    existing_ids = {c.get("ref", {}).get("id") for c in field_candidates}
+                    for result in normalized_results:
+                        if result.get("ref", {}).get("id") not in existing_ids:
+                            field_candidates.append(result)
+                            normalized_count += 1
+                    search_value = f"{metadata.url} → {normalized}"
+                
+                # Filter out the source node
+                if exclude_node_id:
+                    field_candidates = [
+                        c for c in field_candidates 
+                        if c.get("ref", {}).get("id") != exclude_node_id
+                    ]
+                
+                candidates[field.value] = field_candidates
+                # Store detailed search info
+                search_info[field.value] = {
+                    "search_value": search_value,
+                    "count": len(field_candidates),
+                    "original_search": metadata.url,
+                    "original_count": original_count,
+                    "normalized_search": normalized if normalized else None,
+                    "normalized_count": normalized_count
+                }
+                logger.info(f"Field 'url': original={original_count}, normalized=+{normalized_count}, total={len(field_candidates)}")
+                continue  # Skip the default processing
             
             # Filter out the source node
             if exclude_node_id:

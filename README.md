@@ -2,19 +2,19 @@
 
 FastAPI-basierter Dienst zur Erkennung von Dubletten (ähnlichen Inhalten) im WLO-Repository.
 
-**🚀 Live Demo:** https://wlo-duplicate-detection.vercel.app/
-
 ## Features
 
 - **Hash-basierte Erkennung (MinHash)**: Schnelle Ähnlichkeitsberechnung basierend auf Textshingles
-- **Embedding-basierte Erkennung (ONNX)**: Semantische Ähnlichkeit mit konfigurierbarem Modell
+- **Embedding-basierte Erkennung**: Semantische Ähnlichkeit mit Sentence-Transformers (GPU-Unterstützung)
+- **URL-Normalisierung**: Erkennt identische URLs trotz unterschiedlicher Schreibweise
+- **Titel-Normalisierung**: Entfernt Publisher-Suffixe für bessere Kandidatensuche
+- **URL-Exact-Match**: URLs werden immer verglichen - exakte Übereinstimmung = Dublette
 - **Embedding-API**: Separater Endpunkt für Embedding-Generierung (ohne Rate Limit)
-- **Vercel-kompatibel**: Nutzt ONNX Runtime statt PyTorch (~143MB quantisiert)
 - **Flexible Eingabe**: Per Node-ID oder direkte Metadateneingabe
+- **Erweiterte Kandidatensuche**: Original + normalisierte Suchen für mehr Treffer
 - **Paginierung**: Automatische Paginierung für große Kandidatenmengen (>100)
 - **Rate Limiting**: Schutz vor Überlastung (100 Requests/Minute für Detection-Endpoints)
-- **Konfigurierbare Schwellenwerte**: Ähnlichkeitsschwellen individuell einstellbar
-- **Konfigurierbare Suchfelder**: Wählen Sie, welche Metadaten für die Kandidatensuche verwendet werden
+- **Google Colab kompatibel**: Nutzt GPU wenn verfügbar
 
 ## Installation
 
@@ -51,7 +51,7 @@ curl -X POST "http://localhost:8000/detect/hash/by-node" \
   -d '{
     "node_id": "12345678-1234-1234-1234-123456789abc",
     "environment": "production",
-    "similarity_threshold": 0.8,
+    "similarity_threshold": 0.9,
     "search_fields": ["title", "description", "keywords", "url"],
     "max_candidates": 100
   }'
@@ -70,7 +70,7 @@ curl -X POST "http://localhost:8000/detect/hash/by-metadata" \
       "keywords": ["Mathematik", "Grundschule", "Rechnen"]
     },
     "environment": "production",
-    "similarity_threshold": 0.8
+    "similarity_threshold": 0.9
   }'
 ```
 
@@ -125,7 +125,7 @@ curl -X POST "http://localhost:8000/embed" \
   "text": "Dies ist ein Beispieltext",
   "embedding": [0.0234, -0.0567, ...],
   "dimensions": 384,
-  "model": "multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt"
+  "model": "paraphrase-multilingual-MiniLM-L12-v2"
 }
 ```
 
@@ -145,7 +145,7 @@ curl -X POST "http://localhost:8000/embed/batch" \
   "embeddings": [[...], [...], [...]],
   "dimensions": 384,
   "count": 3,
-  "model": "multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt"
+  "model": "paraphrase-multilingual-MiniLM-L12-v2"
 }
 ```
 
@@ -163,7 +163,7 @@ curl -X POST "http://localhost:8000/embed/batch" \
 
 | Parameter | Typ | Default | Beschreibung |
 |-----------|-----|---------|--------------|
-| `similarity_threshold` | float | `0.8` | Mindestähnlichkeit (0-1) |
+| `similarity_threshold` | float | `0.9` | Mindestähnlichkeit (0-1) |
 
 ### Embedding-spezifisch
 
@@ -187,17 +187,44 @@ curl -X POST "http://localhost:8000/embed/batch" \
   "success": true,
   "source_node_id": "12345678-...",
   "source_metadata": {
-    "title": "...",
+    "title": "Islam - Wikipedia",
     "description": "...",
     "keywords": ["..."],
-    "url": "..."
+    "url": "https://de.wikipedia.org/wiki/Islam"
   },
   "method": "hash",
-  "threshold": 0.8,
-  "total_candidates_checked": 42,
+  "threshold": 0.9,
+  "candidate_search_results": [
+    {
+      "field": "title",
+      "search_value": "Islam - Wikipedia → Islam",
+      "candidates_found": 45,
+      "original_count": 15,
+      "normalized_search": "Islam",
+      "normalized_count": 30,
+      "highest_similarity": 0.95
+    },
+    {
+      "field": "url",
+      "search_value": "https://de.wikipedia.org/wiki/Islam → de.wikipedia.org/wiki/islam",
+      "candidates_found": 12,
+      "original_count": 2,
+      "normalized_search": "de.wikipedia.org/wiki/islam",
+      "normalized_count": 10,
+      "highest_similarity": 1.0
+    }
+  ],
+  "total_candidates_checked": 57,
   "duplicates": [
     {
-      "node_id": "abcdef12-...",
+      "node_id": "abc123-...",
+      "title": "Islam",
+      "similarity_score": 1.0,
+      "match_source": "url_exact",
+      "url": "https://de.wikipedia.org/wiki/Islam"
+    },
+    {
+      "node_id": "def456-...",
       "title": "Ähnlicher Inhalt",
       "similarity_score": 0.92,
       "match_source": "title",
@@ -211,15 +238,23 @@ curl -X POST "http://localhost:8000/embed/batch" \
 ## Ablauf der Erkennung
 
 1. **Metadaten laden**: Bei Node-ID-Anfragen werden die vollständigen Metadaten von WLO geladen
-2. **Kandidatensuche**: Suche nach potenziellen Duplikaten über ngsearch:
-   - `title`: Suche im Volltextindex
+
+2. **Kandidatensuche** (erweitert mit Normalisierung):
+   - `title`: Original + normalisiert (ohne Publisher-Suffix wie "- Wikipedia")
    - `description`: Suche in den ersten 100 Zeichen
    - `keywords`: Suche mit kombinierten Keywords
-   - `url`: Exakte URL-Suche
-3. **Ähnlichkeitsberechnung**:
+   - `url`: Original + normalisiert (ohne Protokoll, www, Query-Parameter)
+
+3. **URL-Prüfung** (hat Priorität!):
+   - Alle Kandidaten werden auf URL-Übereinstimmung geprüft
+   - Normalisierte URLs werden verglichen (http://www.example.com/ = example.com)
+   - **Exakte URL-Übereinstimmung = Dublette** (unabhängig vom Schwellenwert!)
+
+4. **Ähnlichkeitsberechnung** (für nicht-URL-Treffer):
    - **Hash**: MinHash-Signaturen + Kosinus-Ähnlichkeit
    - **Embedding**: Sentence-Transformer + Kosinus-Ähnlichkeit
-4. **Filterung**: Nur Ergebnisse über dem Schwellenwert werden zurückgegeben
+
+5. **Ergebnis**: URL-Matches + Treffer über Schwellenwert
 
 ## Unterschied Hash vs. Embedding
 
@@ -230,56 +265,62 @@ curl -X POST "http://localhost:8000/embed/batch" \
 | **Modell** | Shingle-basiert | Multilingual MiniLM |
 | **Ideal für** | Exakte/nahe Duplikate | Umformulierte Texte |
 
-## Embedding-Modell Konfiguration
+## Normalisierung
 
-Die API unterstützt verschiedene Embedding-Modelle je nach Deployment:
+### URL-Normalisierung
 
-| Umgebung | Modell | Größe | Sprachen |
-|----------|--------|-------|----------|
-| **Vercel** | `multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt` | ~99 MB | DE, EN, ES, FR, IT, NL, PL, PT |
-| **Lokal (empfohlen)** | `paraphrase-multilingual-MiniLM-L12-v2` | ~450 MB | 50+ Sprachen |
+URLs werden normalisiert für besseres Matching:
+
+| Original | Normalisiert |
+|----------|--------------|
+| `https://www.example.com/page/` | `example.com/page` |
+| `http://example.com/page?utm=x` | `example.com/page` |
+| `HTTPS://WWW.EXAMPLE.COM/Page` | `example.com/page` |
+
+### Titel-Normalisierung
+
+Publisher-Suffixe werden für die Kandidatensuche entfernt:
+
+| Original | Normalisiert |
+|----------|--------------|
+| `Islam - Wikipedia` | `Islam` |
+| `Mathematik \| Klexikon` | `Mathematik` |
+| `Geschichte (planet-schule.de)` | `Geschichte` |
+
+Unterstützte Suffixe: Wikipedia, Klexikon, Wikibooks, planet-schule, Lehrer-Online, sofatutor, serlo, u.a.
+
+## Match-Typen
+
+| `match_source` | Bedeutung | Schwellenwert |
+|----------------|-----------|---------------|
+| `url_exact` | Normalisierte URLs identisch | **Immer Dublette** |
+| `title` | Titel-basierter Treffer | Muss ≥ threshold sein |
+| `description` | Beschreibungs-Treffer | Muss ≥ threshold sein |
+| `keywords` | Keyword-Treffer | Muss ≥ threshold sein |
+| `url` | URL-Suche (nicht exakt) | Muss ≥ threshold sein |
+
+## Embedding-Modell
+
+**Standard-Modell:** `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+- 50+ Sprachen unterstützt
+- 384-dimensionale Embeddings
+- GPU-Beschleunigung wenn verfügbar
 
 ### Modell wechseln
 
-Es gibt drei Möglichkeiten, das Embedding-Modell zu ändern:
-
-**1. Umgebungsvariable (empfohlen):**
+**Umgebungsvariable:**
 ```bash
 # Linux/Mac
-export EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+export EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2"
 
 # Windows PowerShell
-$env:EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+$env:EMBEDDING_MODEL="sentence-transformers/all-MiniLM-L6-v2"
 ```
 
-**2. `.env` Datei:**
+**Oder `.env` Datei:**
 ```
-EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ```
-
-**3. Config-Datei (`app/config.py`):**
-```python
-local_model: str = Field(default="sentence-transformers/ihr-modell")
-```
-
-### Priorität der Modellwahl
-
-```
-1. EMBEDDING_MODEL Umgebungsvariable (höchste Priorität)
-   ↓
-2. Vercel-Erkennung → vercel_model (kleineres Modell)
-   ↓
-3. Lokal → local_model (größeres Modell)
-```
-
-### Empfehlung für lokales Deployment
-
-Für bessere Erkennungsqualität außerhalb von Vercel empfehlen wir das größere Modell:
-
-Das größere Modell bietet:
-- ✅ Bessere semantische Erkennung
-- ✅ Unterstützung für 50+ Sprachen
-- ✅ Höhere Genauigkeit bei mehrsprachigen Inhalten
 
 Mehr Infos: https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 
@@ -290,59 +331,16 @@ Mehr Infos: https://huggingface.co/sentence-transformers/paraphrase-multilingual
 uvicorn app.main:app --reload --port 8000
 ```
 
-## Modell exportieren (für schnelleren Start)
+## Google Colab
 
-Das ONNX-Modell kann lokal gespeichert werden für schnellere Ladezeiten:
+Die API kann in Google Colab mit GPU-Unterstützung betrieben werden:
 
-```bash
-# Quantisiertes Modell exportieren (~143 MB, Vercel-kompatibel)
-python scripts/export_model_quantized.py
+```python
+# In Colab ausführen
+!pip install -q sentence-transformers fastapi uvicorn
 
-# Oder: Volles Modell (~480 MB, nur für lokale Nutzung)
-python scripts/export_model.py
+# GPU wird automatisch erkannt und genutzt
 ```
-
-Der Health-Endpoint zeigt an, ob das lokale Modell verwendet wird:
-```json
-{
-  "embedding_model_local": true
-}
-```
-
-## Deployment
-
-### Lokal / eigener Server (empfohlen)
-
-Für beste Qualität mit dem größeren Modell:
-
-```bash
-# Optional: Größeres Modell verwenden
-export EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-
-# Server starten
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-# Erster Start: Modell wird heruntergeladen (einmalig)
-```
-
-### Vercel
-
-Auf Vercel wird automatisch das kleinere Modell (`multilingual-MiniLM-L12-de-en-es-fr-it-nl-pl-pt`, <100MB) verwendet:
-
-```bash
-# Vercel CLI installieren
-npm i -g vercel
-
-# Deployen (Modell ist bereits im Repo)
-cd duplicate-detection
-vercel
-```
-
-| Methode | Vercel | Lokal |
-|---------|--------|------|
-| Hash-Erkennung | ✅ | ✅ |
-| Embedding-Erkennung | ✅ | ✅ |
-| Embedding-API | ✅ | ✅ |
-| Großes Modell (50+ Sprachen) | ❌ | ✅ |
 
 ## Rate Limits
 
@@ -362,9 +360,8 @@ Die Hash-basierte Dublettenerkennung (MinHash) basiert auf dem Code von:
 ## Technologien
 
 - **FastAPI**: Web-Framework
-- **ONNX Runtime**: Embedding-Modell (Vercel-kompatibel)
-- **Optimum**: Hugging Face ONNX-Integration
-- **scikit-learn**: Ähnlichkeitsberechnung
+- **Sentence-Transformers**: Embedding-Modell (GPU-Unterstützung)
+- **NumPy**: Ähnlichkeitsberechnung
 - **Pydantic**: Datenvalidierung
 - **Loguru**: Logging
 - **SlowAPI**: Rate Limiting

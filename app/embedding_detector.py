@@ -1,123 +1,65 @@
-"""Embedding-based duplicate detection using ONNX runtime (Vercel-compatible).
-
-Lightweight implementation using only:
-- onnxruntime: For model inference
-- tokenizers: For text tokenization (no transformers needed)
-- numpy: For cosine similarity (no sklearn needed)
-"""
+"""Embedding-based duplicate detection using sentence-transformers."""
 
 from typing import List, Optional, Dict, Any
-from pathlib import Path
 import numpy as np
 from loguru import logger
 
 from app.config import detection_config
-from app.models import ContentMetadata, DuplicateCandidate
+from app.models import ContentMetadata, DuplicateCandidate, normalize_url
 
-
-def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute cosine similarity between two vectors using numpy."""
-    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-
-# Check if ONNX runtime is available
-ONNX_AVAILABLE = False
+# Check if sentence-transformers is available
+EMBEDDING_AVAILABLE = False
 try:
-    import onnxruntime as ort
-    from tokenizers import Tokenizer
-    ONNX_AVAILABLE = True
+    from sentence_transformers import SentenceTransformer
+    EMBEDDING_AVAILABLE = True
 except ImportError:
-    logger.warning("onnxruntime/tokenizers not installed. Embedding detection will be disabled.")
-
-# Local model path (exported via scripts/export_model.py)
-LOCAL_MODEL_PATH = Path(__file__).parent.parent / "models" / "embedding-model"
+    logger.warning("sentence-transformers not installed. Embedding detection will be disabled.")
 
 # Lazy load model to avoid startup delay
 _model = None
-_tokenizer = None
 _model_name = None
+
+
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute cosine similarity between two vectors using numpy."""
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
 def is_embedding_available() -> bool:
     """Check if embedding detection is available."""
-    return ONNX_AVAILABLE
-
-
-def is_local_model_available() -> bool:
-    """Check if local ONNX model is available."""
-    return LOCAL_MODEL_PATH.exists() and (LOCAL_MODEL_PATH / "model.onnx").exists()
+    return EMBEDDING_AVAILABLE
 
 
 def get_current_model_name() -> str:
-    """Get the name of the currently configured/loaded model."""
+    """Get the name of the currently loaded model."""
     if _model_name:
-        # Check if it's a local path (contains backslash or models folder)
-        if str(LOCAL_MODEL_PATH) in _model_name or "models" in _model_name or "\\" in _model_name:
-            # For local models, read the model name from model_info.json
-            try:
-                import json
-                info_path = LOCAL_MODEL_PATH / "model_info.json"
-                if info_path.exists():
-                    with open(info_path) as f:
-                        info = json.load(f)
-                        return info.get("model_name", "local-embedding-model")
-            except:
-                pass
-            # Fallback: use vercel model name from config (that's what's exported locally)
-            return detection_config.embedding_config.vercel_model.split("/")[-1]
-        # Return loaded model name (HuggingFace path)
         return _model_name.split("/")[-1] if "/" in _model_name else _model_name
-    # Return configured model name
-    return detection_config.embedding_model_name
+    return detection_config.embedding_model.split("/")[-1]
 
 
-def get_embedding_model():
-    """Get or load the ONNX embedding model (lazy initialization)."""
-    global _model, _tokenizer, _model_name
+def get_embedding_model() -> "SentenceTransformer":
+    """Get or load the embedding model (lazy initialization)."""
+    global _model, _model_name
     
-    if not ONNX_AVAILABLE:
+    if not EMBEDDING_AVAILABLE:
         raise RuntimeError(
             "Embedding detection is not available. "
-            "onnxruntime/tokenizers is not installed. "
-            "Use hash-based detection instead."
+            "Install sentence-transformers: pip install sentence-transformers"
         )
     
-    # Only local model is supported (pre-exported ONNX + tokenizer.json)
-    if not is_local_model_available():
-        raise RuntimeError(
-            "Local ONNX model not found. "
-            f"Expected at: {LOCAL_MODEL_PATH}/model.onnx. "
-            "Run 'python scripts/export_final_model.py' to export the model."
-        )
+    model_id = detection_config.embedding_model
     
-    model_path = str(LOCAL_MODEL_PATH)
-    
-    if _model is None or _model_name != model_path:
+    if _model is None or _model_name != model_id:
         try:
-            logger.info(f"Loading ONNX embedding model from: {model_path}")
-            
-            # Load tokenizer from tokenizer.json (no transformers needed)
-            tokenizer_path = LOCAL_MODEL_PATH / "tokenizer.json"
-            _tokenizer = Tokenizer.from_file(str(tokenizer_path))
-            
-            # Create ONNX Runtime session
-            onnx_path = LOCAL_MODEL_PATH / "model.onnx"
-            sess_options = ort.SessionOptions()
-            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            
-            _model = ort.InferenceSession(
-                str(onnx_path),
-                sess_options,
-                providers=['CPUExecutionProvider']
-            )
-            
-            _model_name = model_path
-            logger.info(f"ONNX embedding model loaded successfully (lightweight mode)")
+            logger.info(f"Loading embedding model: {model_id}")
+            _model = SentenceTransformer(model_id)
+            _model_name = model_id
+            logger.info(f"Embedding model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
-            raise RuntimeError(f"Could not load embedding model {model_path}: {e}")
+            raise RuntimeError(f"Could not load embedding model {model_id}: {e}")
     
-    return _model, _tokenizer
+    return _model
 
 
 def is_model_loaded() -> bool:
@@ -126,42 +68,21 @@ def is_model_loaded() -> bool:
 
 
 class EmbeddingDetector:
-    """Embedding-based duplicate detection using ONNX runtime."""
+    """Embedding-based duplicate detection using sentence-transformers."""
     
     def __init__(self):
         """Initialize embedding detector."""
         self.model = None
-        self.tokenizer = None
-        logger.info("Embedding detector initialized (ONNX model will be loaded on first use)")
+        logger.info("Embedding detector initialized (model will be loaded on first use)")
     
     def _ensure_model(self):
         """Ensure the model is loaded."""
         if self.model is None:
-            self.model, self.tokenizer = get_embedding_model()
-    
-    def _mean_pooling(self, model_output, attention_mask) -> np.ndarray:
-        """Apply mean pooling to get sentence embedding."""
-        token_embeddings = model_output[0]  # First element is token embeddings
-        
-        # Convert to numpy if needed
-        if hasattr(token_embeddings, 'numpy'):
-            token_embeddings = token_embeddings.numpy()
-        if hasattr(attention_mask, 'numpy'):
-            attention_mask = attention_mask.numpy()
-        
-        input_mask_expanded = np.broadcast_to(
-            np.expand_dims(attention_mask, -1),
-            token_embeddings.shape
-        ).astype(float)
-        
-        sum_embeddings = np.sum(token_embeddings * input_mask_expanded, axis=1)
-        sum_mask = np.clip(input_mask_expanded.sum(axis=1), a_min=1e-9, a_max=None)
-        
-        return sum_embeddings / sum_mask
+            self.model = get_embedding_model()
     
     def compute_embedding(self, text: str) -> Optional[np.ndarray]:
         """
-        Compute embedding for text using ONNX model.
+        Compute embedding for text.
         
         Args:
             text: Text to embed
@@ -179,27 +100,8 @@ class EmbeddingDetector:
             if len(text) > 10000:
                 text = text[:10000]
             
-            # Tokenize using tokenizers library
-            self.tokenizer.enable_truncation(max_length=512)
-            self.tokenizer.enable_padding()
-            encoding = self.tokenizer.encode(text)
-            
-            # Prepare inputs for ONNX
-            input_ids = np.array([encoding.ids], dtype=np.int64)
-            attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
-            token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
-            
-            # Run through ONNX model
-            outputs = self.model.run(None, {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids
-            })
-            
-            # Mean pooling (outputs[0] is last hidden state)
-            embedding = self._mean_pooling(outputs, attention_mask)
-            
-            return embedding[0]  # Return first (and only) embedding
+            embedding = self.model.encode(text, convert_to_numpy=True)
+            return embedding
         except Exception as e:
             logger.error(f"Failed to compute embedding: {e}")
             return None
@@ -231,12 +133,11 @@ class EmbeddingDetector:
         if emb1 is None or emb2 is None:
             return 0.0
         
-        # Use numpy-based cosine similarity (no sklearn needed)
-        return cosine_sim(emb1, emb2)
+        return cosine_similarity(emb1, emb2)
     
     def batch_compute_embeddings(self, texts: List[str]) -> List[Optional[np.ndarray]]:
         """
-        Compute embeddings for multiple texts using ONNX model.
+        Compute embeddings for multiple texts.
         
         Args:
             texts: List of texts
@@ -262,25 +163,8 @@ class EmbeddingDetector:
             return [None] * len(texts)
         
         try:
-            # Tokenize all texts at once using tokenizers library
-            self.tokenizer.enable_truncation(max_length=512)
-            self.tokenizer.enable_padding()
-            encodings = self.tokenizer.encode_batch(valid_texts)
-            
-            # Prepare inputs for ONNX
-            input_ids = np.array([e.ids for e in encodings], dtype=np.int64)
-            attention_mask = np.array([e.attention_mask for e in encodings], dtype=np.int64)
-            token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
-            
-            # Run through ONNX model
-            outputs = self.model.run(None, {
-                "input_ids": input_ids,
-                "attention_mask": attention_mask,
-                "token_type_ids": token_type_ids
-            })
-            
-            # Mean pooling (outputs[0] is last hidden state)
-            embeddings = self._mean_pooling(outputs, attention_mask)
+            # Batch encode all texts at once
+            embeddings = self.model.encode(valid_texts, convert_to_numpy=True)
             
             # Build result list
             result = [None] * len(texts)
@@ -423,26 +307,45 @@ class EmbeddingDetector:
         duplicates = []
         field_max_similarity: Dict[str, float] = {}
         
+        # Get normalized source URL for matching
+        source_norm_url = normalize_url(source_metadata.url)
+        
         for search_field, items in field_candidates_data.items():
             field_max = 0.0
             
             for node_id, title, description, keywords, url, text in items:
-                idx = text_to_idx.get(text)
-                if idx is None:
-                    continue
-                emb = all_embeddings[idx]
-                if emb is None:
-                    continue
+                # Check for URL match first (normalized URLs)
+                candidate_norm_url = normalize_url(url)
+                url_match = (source_norm_url and candidate_norm_url and 
+                            source_norm_url == candidate_norm_url)
                 
-                similarity = self.compute_similarity(source_emb, emb)
+                if url_match:
+                    # Exact URL match = definite duplicate
+                    similarity = 1.0
+                    match_type = "url_exact"
+                else:
+                    match_type = search_field
+                    idx = text_to_idx.get(text)
+                    if idx is None:
+                        continue
+                    emb = all_embeddings[idx]
+                    if emb is None:
+                        continue
+                    
+                    similarity = self.compute_similarity(source_emb, emb)
                 
                 # Track max for this field
                 if similarity > field_max:
                     field_max = similarity
                 
-                # Only add to duplicates if not already seen
-                if node_id not in seen_ids_global and similarity >= threshold:
-                    seen_ids_global.add(node_id)
+                # Skip if already processed
+                if node_id in seen_ids_global:
+                    continue
+                seen_ids_global.add(node_id)
+                
+                # URL matches are ALWAYS duplicates (regardless of threshold)
+                # Other matches must meet the similarity threshold
+                if url_match or similarity >= threshold:
                     duplicates.append(DuplicateCandidate(
                         node_id=node_id,
                         title=title,
@@ -450,7 +353,7 @@ class EmbeddingDetector:
                         keywords=keywords,
                         url=url,
                         similarity_score=round(similarity, 4),
-                        match_source=search_field
+                        match_source=match_type
                     ))
             
             # Store max similarity for this field
@@ -460,7 +363,10 @@ class EmbeddingDetector:
         # Sort by similarity (highest first)
         duplicates.sort(key=lambda x: x.similarity_score, reverse=True)
         
-        logger.info(f"Found {len(duplicates)} embedding-based duplicates above threshold {threshold}")
+        # Count URL exact matches vs similarity matches
+        url_matches = sum(1 for d in duplicates if d.match_source == "url_exact")
+        sim_matches = len(duplicates) - url_matches
+        logger.info(f"Found {len(duplicates)} embedding-based duplicates: {url_matches} URL-exact, {sim_matches} above threshold {threshold}")
         return duplicates, field_max_similarity
 
 

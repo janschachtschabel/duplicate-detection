@@ -28,7 +28,7 @@ from app.models import (
 )
 from app.wlo_client import WLOClient
 from app.hash_detector import hash_detector
-from app.embedding_detector import embedding_detector, is_model_loaded, is_embedding_available, is_local_model_available, get_current_model_name
+from app.embedding_detector import embedding_detector, is_model_loaded, is_embedding_available, get_current_model_name
 from app.config import detection_config
 
 # Configure logging with JSON format for production
@@ -44,7 +44,7 @@ logger.add(
 limiter = Limiter(key_func=get_remote_address)
 
 # Request timeout (seconds)
-REQUEST_TIMEOUT = 55  # Vercel has 60s limit, leave buffer
+REQUEST_TIMEOUT = 55
 
 
 @asynccontextmanager
@@ -64,7 +64,7 @@ API für die Erkennung von Dubletten (ähnlichen Inhalten) im WLO-Repository.
 ## Funktionen
 
 - **Hash-basierte Erkennung**: Nutzt MinHash für schnelle Ähnlichkeitsberechnung basierend auf Textshingles
-- **Embedding-basierte Erkennung**: Nutzt konfigurierbares ONNX-Modell für semantische Ähnlichkeit
+- **Embedding-basierte Erkennung**: Nutzt Sentence-Transformers für semantische Ähnlichkeit
 
 ## Ablauf
 
@@ -166,11 +166,19 @@ def build_candidate_stats(search_info: dict, field_similarities: dict = None) ->
         
         highest_sim = field_similarities.get(field)
         
+        # Get normalized search info if available
+        normalized_search = info.get("normalized_search")
+        if normalized_search and len(normalized_search) > 50:
+            normalized_search = normalized_search[:50] + "..."
+        
         stats.append(CandidateStats(
             field=field,
             search_value=search_val,
             candidates_found=info.get("count", 0),
-            highest_similarity=highest_sim
+            highest_similarity=highest_sim,
+            original_count=info.get("original_count"),
+            normalized_search=normalized_search,
+            normalized_count=info.get("normalized_count")
         ))
     return stats
 
@@ -188,32 +196,14 @@ def build_candidate_stats(search_info: dict, field_similarities: dict = None) ->
 )
 async def health_check():
     """Check API health status."""
-    # Get the actual model name (from loaded model or model_info.json)
-    model_name = get_current_model_name() if is_model_loaded() else _get_local_model_name()
-    
     return HealthResponse(
         status="healthy",
         hash_detection_available=True,
         embedding_detection_available=is_embedding_available(),
         embedding_model_loaded=is_model_loaded(),
-        embedding_model_local=is_local_model_available(),
-        embedding_model_name=model_name,
+        embedding_model_name=get_current_model_name(),
         version="1.0.0"
     )
-
-
-def _get_local_model_name() -> str:
-    """Get model name from local model_info.json if available."""
-    import json
-    from pathlib import Path
-    info_path = Path(__file__).parent.parent / "models" / "embedding-model" / "model_info.json"
-    if info_path.exists():
-        try:
-            with open(info_path) as f:
-                return json.load(f).get("model_name", detection_config.embedding_model_name)
-        except:
-            pass
-    return detection_config.embedding_model_name
 
 
 # ============================================================================
@@ -515,7 +505,7 @@ async def detect_embedding_by_metadata(request: Request, body: EmbeddingMetadata
     description="""
 Erzeugt einen Embedding-Vektor für einen Text.
 
-**Modell:** Konfigurierbar (siehe /health für aktuelles Modell) (ONNX)
+**Modell:** Konfigurierbar (siehe /health für aktuelles Modell)
 
 **Ausgabe:** 384-dimensionaler Vektor
 
@@ -576,7 +566,7 @@ async def create_embedding(body: EmbeddingRequest):
     description="""
 Erzeugt Embedding-Vektoren für mehrere Texte gleichzeitig.
 
-**Modell:** Konfigurierbar (siehe /health für aktuelles Modell) (ONNX)
+**Modell:** Konfigurierbar (siehe /health für aktuelles Modell)
 
 **Ausgabe:** Liste von 384-dimensionalen Vektoren
 
