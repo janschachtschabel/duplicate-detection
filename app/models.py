@@ -52,6 +52,9 @@ def normalize_title(title: Optional[str]) -> Optional[str]:
         normalized = re.sub(pattern, '', normalized, flags=re.IGNORECASE)
     
     normalized = normalized.strip()
+    normalized = normalized.replace('&', '')
+    normalized = normalized.replace('  ', ' ')
+    logger.debug(f"Normalized title: '{normalized}'")
     
     # Return None if normalized is empty or same as original
     if not normalized:
@@ -391,7 +394,6 @@ class SearchField(str, Enum):
     """Available metadata fields for candidate search."""
     TITLE = "title"
     DESCRIPTION = "description"
-    KEYWORDS = "keywords"
     URL = "url"
 
 
@@ -456,7 +458,7 @@ class DetectionRequest(BaseModel):
         description="WLO environment (production or staging)"
     )
     search_fields: List[SearchField] = Field(
-        default=[SearchField.TITLE, SearchField.DESCRIPTION, SearchField.KEYWORDS, SearchField.URL],
+        default=[SearchField.TITLE, SearchField.DESCRIPTION, SearchField.URL],
         description="Metadata fields to use for candidate search"
     )
     max_candidates: int = Field(
