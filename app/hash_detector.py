@@ -172,11 +172,11 @@ class MinHashDetector:
     ) -> tuple[List[DuplicateCandidate], Dict[str, float]]:
         """
         Find duplicates among candidates using MinHash.
-        Compares only the same fields that are present in source_metadata.
+        Compares only the same fields that are present in source_metadata AND were searched.
         
         Args:
             source_metadata: Source content metadata
-            candidates: Dict of search_field -> candidate nodes
+            candidates: Dict of search_field -> candidate nodes (keys indicate which fields were searched)
             threshold: Minimum similarity threshold
             
         Returns:
@@ -186,10 +186,15 @@ class MinHashDetector:
         """
         threshold = threshold or detection_config.default_hash_threshold
         
+        # Determine which fields were actually searched (from candidates keys)
+        searched_fields = set(candidates.keys())
+        
         # Determine which fields are available in source
+        # Title and description are always used for scoring (if available)
+        # Keywords only count if they were explicitly requested in search_fields
         has_title = self._is_valid_field(source_metadata.title)
         has_description = self._is_valid_field(source_metadata.description)
-        has_keywords = False
+        has_keywords = self._is_valid_field(source_metadata.keywords) and "keywords" in searched_fields
         
         # Build source text from available fields only
         source_parts = []
@@ -197,17 +202,19 @@ class MinHashDetector:
             source_parts.append(source_metadata.title)
         if has_description:
             source_parts.append(source_metadata.description)
+        if has_keywords:
+            valid_kw = [k for k in source_metadata.keywords if k and k.strip().lower() != "string"]
+            source_parts.extend(valid_kw)
         
-        logger.debug(f"Source data: {source_parts}")
-
         source_text = " ".join(source_parts)
+        logger.debug(f"Source data: {source_parts}")
         source_sig = self.compute_text_signature(source_text)
         
         if source_sig is None:
             logger.warning("Could not compute signature for source metadata")
             return [], {}
         
-        logger.info(f"Source fields: title={has_title}, description={has_description}")
+        logger.info(f"Source fields: title={has_title}, description={has_description}, keywords={has_keywords}")
         
         # Track seen node IDs to avoid duplicates
         seen_ids = set()
@@ -241,6 +248,10 @@ class MinHashDetector:
                         break
                 
                 keywords = None
+                if "cclom:general_keyword" in properties:
+                    kw = properties["cclom:general_keyword"]
+                    keywords = kw if isinstance(kw, list) else [kw]
+                
                 url = None
                 for key in ["ccm:wwwurl", "cclom:location"]:
                     if key in properties:
